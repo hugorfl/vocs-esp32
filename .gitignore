@@ -30,3 +30,36 @@
 *.exe
 *.out
 *.app
+
+# Arduino
+bin/
+*.lst
+*.sym
+*.map
+*.lss
+*.elf
+*.eep
+.dep/
+build/
+test-bin
+app/pde.jar
+arduino-core/arduino-core.jar
+hardware/arduino/avr/libraries/Bridge/examples/XivelyClient/passwords.h
+
+# Other files
+*.zip
+*.tar.bz2
+*.tgz
+*.tar.gz
+*.tar.xz
+
+# System files
+.directory
+.DS_Store
+
+# Other ides
+*.iml
+.idea/
+manifest.mf
+nbbuild.xml
+nbproject/
