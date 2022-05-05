@@ -1,0 +1,12 @@
+[submodule "libraries/LiquidCrystal_I2C"]
+	path = libraries/LiquidCrystal_I2C
+	url = https://github.com/johnrickman/LiquidCrystal_I2C.git
+[submodule "libraries/DHT-sensor-library"]
+	path = libraries/DHT-sensor-library
+	url = https://github.com/adafruit/DHT-sensor-library.git
+[submodule "libraries/Adafruit_Sensor"]
+	path = libraries/Adafruit_Sensor
+	url = https://github.com/adafruit/Adafruit_Sensor.git
+[submodule "libraries/Tone32"]
+	path = libraries/Tone32
+	url = https://github.com/lbernstone/Tone32
