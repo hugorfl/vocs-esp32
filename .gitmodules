@@ -10,3 +10,6 @@
 [submodule "libraries/Tone32"]
 	path = libraries/Tone32
 	url = https://github.com/lbernstone/Tone32
+[submodule "libraries/WiFiManager"]
+	path = libraries/WiFiManager
+	url = https://github.com/tzapu/WiFiManager.git
