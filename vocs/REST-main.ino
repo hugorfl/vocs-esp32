@@ -52,12 +52,17 @@ void test() {
     saveMeasure("20b", "21", "22");
     saveMeasure("30c", "31", "32");
     saveMeasure("40d", "41", "42");
-    
+
     // optional, for debugging
-    printLocalHistory(); 
+    printLocalHistory();
 
     // step 2: Send data to server
-    sendDataToServer();
+    if (measure_counter > 0) {
+        executePOST();
+    }
+    else {
+        Serial.println("There is NO data to send to server");
+    }
 
     // step 3: Clear history
     clearLocalHistory();
@@ -73,14 +78,14 @@ void saveMeasure(String temperature, String humidity, String toluene) {
 }
 
 void sendDataToServer() {
-  createJSONPayload();
-  executePOST();
+    createJSONPayload();
+    executePOST();
 }
 
 void clearLocalHistory() {
-  measure_counter = 0;
-  payloadPOST = "";
-  memset(localHistory, 0, sizeof(localHistory));
+    measure_counter = 0;
+    payloadPOST = "";
+    memset(localHistory, 0, sizeof(localHistory));
 }
 
 void createJSONPayload() {
