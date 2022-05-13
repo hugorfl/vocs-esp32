@@ -10,8 +10,8 @@ class DeviceInfo {
   public:
     DeviceInfo();
     const char* getChipModel() const ;
-    void getChipId(char *chipId, int buffSize = 9) const;
-    void getSSIDName(char* deviceSSID, int buffSize = 32) const;
+    void getChipId(char *resChipId, int buffSize = 9) const;
+    void getDeviceName(char* resDeviceName, int buffSize = 32) const;
 };
 
 #endif

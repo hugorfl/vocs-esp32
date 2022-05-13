@@ -16,13 +16,13 @@ void DeviceInfo::getChipId(char* resChipId, int buffSize) const {
   strHelper.c_format(resChipId, buffSize, "%08X", (uint32_t) ESP.getEfuseMac());
 }
 
-void DeviceInfo::getSSIDName(char* resDeviceSSID, int buffSize) const {
+void DeviceInfo::getDeviceName(char* resDeviceName, int buffSize) const {
   char chipId[buffSize];
   
-  if (!resDeviceSSID || buffSize < 1) {
+  if (!resDeviceName || buffSize < 1) {
     return;
   }
   
   getChipId(chipId);
-  strHelper.c_format(resDeviceSSID, buffSize, "%s_%s", getChipModel(), chipId);
+  strHelper.c_format(resDeviceName, buffSize, "%s_%s", getChipModel(), chipId);
 }
