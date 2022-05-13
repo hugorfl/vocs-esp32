@@ -1,125 +1,252 @@
 #include <DHT.h>
-#include <LiquidCrystal_I2C.h>
+#include <WiFiManager.h>
 #include <pitches.h>
-#include <Tone32.h>
+#include "Button.h"
+#include "DeviceInfo.h"
+#include "Display.h"
+#include "SpanishDisplayStrings.h"
 
+// ##### Sensors
 #define DHT_PIN 13
 #define DHT_TYPE DHT22
+#define TEMP_HUMIDITY_DELAY 2000
 
 #define MQ_PIN 36
 
+// ##### Input devices
+#define BTN_ACK_PIN 12
+
+#define DEBUG_PIN 14
+
+// ##### Ouput devices
 #define LCD_I2C_ADDR 0x27
-#define LCD_COLS 16
-#define LCD_ROWS 2
+#define SCREEN_REFRESH_MS 1000
 
-#define LED_GREEN_PIN 6
-#define LED_YELLOW_PIN 7
-#define LED_RED_PIN 8
+#define LED_GREEN_PIN 15
+#define LED_YELLOW_PIN 2
+#define LED_RED_PIN 4
 
-#define BUZZER_PIN 35
-#define BUZZER_CHANNEL 0
+#define BUZZER_PIN 16
 
-#define BTN_ACK_PIN 15
+// ##### WiFi
+#define WIFI_AP_DEFAULT_PWD "abcd1234"
 
-#define REFRESH_WAIT 1000
+// ##### Cores programming
+#define TASK_STACK_SIZE 10240 // 10kb
+#define TASK_CORE_ZERO 0
+#define TASK_CORE_ONE 1
+
+
+// ##### Globals
+DeviceInfo info;
+LangDisplayStrings* strings = new SpanishDisplayStrings();
 
 DHT dht(DHT_PIN, DHT_TYPE);
-LiquidCrystal_I2C lcd (LCD_I2C_ADDR, LCD_COLS, LCD_ROWS);
+Display lcd(LCD_I2C_ADDR);
+Button btnAck(BTN_ACK_PIN);
 
-struct Button {
-  uint32_t btnPresses;
-  bool isPressed;
-};
+TaskHandle_t lcdTask;
+TaskHandle_t tempHumidityTask;
+TaskHandle_t ledsSemaphoreTask;
+SemaphoreHandle_t semaphore;
 
-Button btnAck = {0, false};
+bool isInitialiazed = false;
+bool isDebugModeEnabled = false;
 
-int melody[] = {
-  NOTE_C4, NOTE_G3, NOTE_G3, NOTE_A3, NOTE_G3, 0, NOTE_B3, NOTE_C4
-};
-
-int noteDurations[] = {
-  4, 8, 8, 4, 4, 4, 4, 4
-};
-
-ICACHE_RAM_ATTR void btn_ack() {
-  btnAck.btnPresses++;
-  btnAck.isPressed = true;
-}
+int currLed = 0;
 
 void setup() {
+  WiFi.mode(WIFI_STA);
   Serial.begin(115200);
+
+  initTasks();
+  initDevices();
+
+  isInitialiazed = true;
+}
+
+void initTasks() {
+  semaphore = xSemaphoreCreateMutex();
+  xTaskCreatePinnedToCore(lcdTaskLoop, "lcdTask", TASK_STACK_SIZE, NULL, 1, &lcdTask, TASK_CORE_ONE);
+  xTaskCreatePinnedToCore(
+    tempHumiditySensorTaskLoop,
+    "tempHumiditySensorTask",
+    TASK_STACK_SIZE,
+    NULL,
+    2,
+    &tempHumidityTask,
+    TASK_CORE_ONE);
+  xTaskCreatePinnedToCore(ledsSemaphoreTaskLoop, "ledsSemaphoreTask", TASK_STACK_SIZE, NULL, 1, &ledsSemaphoreTask, TASK_CORE_ONE);
+}
+
+void initDevices() {
+  const char* text = strings->initializingText();
   
-  dht.begin();
   lcd.init();
-  lcd.backlight();
+  lcd.push(text, sizeof(text));
 
-  // pinMode(BUZZER_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+  soundBuzzer();
 
-  pinMode(BTN_ACK_PIN, INPUT_PULLUP);
-  attachInterrupt(BTN_ACK_PIN,  btn_ack, FALLING);
+  pinMode(LED_GREEN_PIN, OUTPUT);
+  pinMode(LED_YELLOW_PIN, OUTPUT);
+  pinMode(LED_RED_PIN, OUTPUT);
+
+  dht.begin();
+
+  pinMode(DEBUG_PIN, INPUT);
+
+  if (digitalRead(DEBUG_PIN) == HIGH) {
+    isDebugModeEnabled = true;
+    lcd.push("Modo Debug", sizeof("Modo Debug"));
+  }
   
+  btnAck.init(INPUT_PULLUP);
+  btnAck.addInterrupt(isrBtnAck, FALLING);
+
+  initWifiService();
+}
+
+void initWifiService() {
+  WiFiManager wm;
+  char ssid[32];
+
+  //TODO: reset settings - remove after testing
+  wm.resetSettings();
+  // wm.setTimeout(120);
+  wm.setAPCallback(accessPointModeCallback);
+
+  info.getSSIDName(ssid);
+
+  bool isConnected = wm.autoConnect(ssid, WIFI_AP_DEFAULT_PWD);
+}
+
+void accessPointModeCallback(WiFiManager* wm) {
+  char ssid[32];
+  info.getSSIDName(ssid);
+  
+  printfWifiCredentialsLCD(ssid, WIFI_AP_DEFAULT_PWD);
+}
+
+void printfWifiCredentialsLCD(const char* ssid, const char* pwd) {
+  static char ssidText[32], pwdText[16];
+  
+  strings->joinNetworkSSIDText(ssid, ssidText, sizeof(ssidText));
+  strings->joinNetworkPwdText(pwd, pwdText, sizeof(pwdText));
+  
+  lcd.put(0, ssidText, sizeof(ssidText));
+  lcd.put(1, pwdText, sizeof(pwdText));
 }
 
 void loop() {
-  lcd.clear();
-  
-  if (btnAck.isPressed) {
-    printAck();
-    btnAck.isPressed = false;
+  vTaskDelete(NULL);
+}
+
+ICACHE_RAM_ATTR void isrBtnAck() {
+  btnAck.pressButton();
+}
+
+void lcdTaskLoop(void* param) {
+  while(true) {
+    xSemaphoreTake(semaphore, portMAX_DELAY);
+    lcd.show();
+    xSemaphoreGive(semaphore);
+    
+    delay(SCREEN_REFRESH_MS);
   }
+}
 
-  printTemperature(dht.readTemperature());
-  printHumidity(dht.readHumidity());
-
-  delay(REFRESH_WAIT);
+void tempHumiditySensorTaskLoop(void* param) {
+  float temperature;
+  float humidity;
   
-}
+  while(true) {
+    xSemaphoreTake(semaphore, portMAX_DELAY);
+    temperature = dht.readTemperature();
+    humidity = dht.readHumidity();
+    xSemaphoreGive(semaphore);
 
-void printLCD(int row, String text) {
-  lcd.setCursor(0, row);
-  lcd.print(text);
-}
-
-void printTemperature(float temperature) {
-  String text = "Temp.: ";
-  text.concat(temperature);
-  text.concat((char) 0xDF);
-  
-  printLCD(0, text);
-}
-
-void printHumidity(float humidity) {
-  String text = "Humedad: ";
-  text.concat(humidity);
-  text.concat("%");
-  
-  printLCD(1, text);
-}
-
-void printAck() {
-  String text = "Boton ACK presionado ";
-  text.concat(btnAck.btnPresses);
-  text.concat(" veces");
-
-  printLCD(0, text);
-  rotateTextLeft(text);
-  soundBuzzer();
-  lcd.clear();
-}
-
-void rotateTextLeft(String text) {
-  int screenRefresh = 600;
-  
-  for (int i = 0; i < text.length() - LCD_COLS; i++) {
-    delay(screenRefresh);
-    lcd.scrollDisplayLeft();
+    if (isInitialiazed) {
+      printTemperatureHumidityMetrics(temperature, humidity);
+      // TODO: rest connectivity
+    }
+    
+    delay(TEMP_HUMIDITY_DELAY);
   }
-  
-  delay(screenRefresh);
 }
+
+void printTemperatureHumidityMetrics(float temperature, float humidity) {
+  static char temperatureText[32], humidityText[32];
+  
+  strings->joinHumidityText(humidity, humidityText, sizeof(humidityText));
+  strings->joinTemperatureText(temperature, temperatureText, sizeof(temperatureText));
+
+  lcd.put(0, temperatureText, sizeof(temperatureText));
+  lcd.put(1, humidityText, sizeof(humidityText));
+}
+
+void ledsSemaphoreTaskLoop(void* param) {
+  while(true) {
+    if (btnAck.getIsPressed()) {
+      switch(currLed) {
+        case 0:
+          digitalWrite(LED_GREEN_PIN, HIGH);
+          digitalWrite(LED_YELLOW_PIN, LOW);
+          digitalWrite(LED_RED_PIN, LOW);
+          currLed = 1;
+          break;
+        case 1:
+          digitalWrite(LED_GREEN_PIN, LOW);
+          digitalWrite(LED_YELLOW_PIN, HIGH);
+          digitalWrite(LED_RED_PIN, LOW);
+          currLed = 2;
+          break;
+        case 2:
+          digitalWrite(LED_GREEN_PIN, LOW);
+          digitalWrite(LED_YELLOW_PIN, LOW);
+          digitalWrite(LED_RED_PIN, HIGH);
+          currLed = 3;
+          break;
+        default:
+          digitalWrite(LED_GREEN_PIN, LOW);
+          digitalWrite(LED_YELLOW_PIN, LOW);
+          digitalWrite(LED_RED_PIN, LOW);
+          currLed = 0;
+          btnAck.releaseButton();
+      }
+    }
+
+    delay(1000);
+  }
+}
+
+
+int melody[] = {
+  NOTE_E5, NOTE_E5, NOTE_E5,
+  NOTE_E5, NOTE_E5, NOTE_E5,
+  NOTE_E5, NOTE_G5, NOTE_C5, NOTE_D5,
+  NOTE_E5,
+  NOTE_F5, NOTE_F5, NOTE_F5, NOTE_F5,
+  NOTE_F5, NOTE_E5, NOTE_E5, NOTE_E5, NOTE_E5,
+  NOTE_E5, NOTE_D5, NOTE_D5, NOTE_E5,
+  NOTE_D5, NOTE_G5
+};
+
+int noteDurations[] = {
+  8, 8, 4,
+  8, 8, 4,
+  8, 8, 8, 8,
+  2,
+  8, 8, 8, 8,
+  8, 8, 8, 16, 16,
+  8, 8, 8, 8,
+  4, 4
+};
 
 void soundBuzzer() {
-  for (int note = 0; note < 8; note++) {
+  int size = sizeof(noteDurations) / sizeof(int);
+
+  for (int note = 0; note < size; note++) {
     int noteDuration = 1000 / noteDurations[note];
     tone(BUZZER_PIN, melody[note], noteDuration);
 
