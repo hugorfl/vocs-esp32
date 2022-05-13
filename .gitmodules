@@ -13,3 +13,6 @@
 [submodule "libraries/WiFiManager"]
 	path = libraries/WiFiManager
 	url = https://github.com/tzapu/WiFiManager.git
+[submodule "libraries/ArduinoJson"]
+	path = libraries/ArduinoJson
+	url = https://github.com/bblanchon/ArduinoJson.git
