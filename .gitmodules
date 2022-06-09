@@ -16,3 +16,6 @@
 [submodule "libraries/ArduinoJson"]
 	path = libraries/ArduinoJson
 	url = https://github.com/bblanchon/ArduinoJson.git
+[submodule "libraries/MQSensorsLib"]
+	path = libraries/MQSensorsLib
+	url = https://github.com/miguel5612/MQSensorsLib.git
