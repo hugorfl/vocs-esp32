@@ -1,4 +1,5 @@
 #include <DHT.h>
+#include <MQUnifiedsensor.h>
 #include <WiFiManager.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -10,10 +11,12 @@
 // ##### Sensors
 #define DHT_PIN 13
 #define DHT_TYPE DHT22
-#define TEMP_HUMIDITY_DELAY 2000
 
 #define MQ_PIN 36
-#define MQ_DELAY 30000
+#define RatioMQ135CleanAir 3.6
+#define MQ_TYPE "MQ-135"
+
+#define METRICS_DELAY 3000
 
 // ##### Input devices
 #define BTN_ACK_PIN 12
@@ -25,7 +28,7 @@
 #define SCREEN_REFRESH_MS 1000
 
 #define LED_GREEN_PIN 15
-#define LED_YELLOW_PIN 2
+#define LED_YELLOW_PIN 0
 #define LED_RED_PIN 4
 
 #define BUZZER_PIN 16
@@ -34,7 +37,8 @@
 #define WIFI_AP_DEFAULT_PWD "abcd1234"
 
 #define OCI_ENDPOINT "https://g14fcd8d7fc5e27-db70cmj.adb.ca-toronto-1.oraclecloudapps.com/ords/iot/vocs/insertVoc/"
-#define REST_DELAY 300000
+#define SAVE_METRICS_DELAY 3000
+#define REST_DELAY 15000
 
 // ##### Cores programming
 #define TASK_STACK_SIZE 10240 // 10kb
@@ -47,28 +51,28 @@ DeviceInfo info;
 LangDisplayStrings* strings = new SpanishDisplayStrings();
 
 DHT dht(DHT_PIN, DHT_TYPE);
+MQUnifiedsensor mq ("ESP-32", 5, 12, MQ_PIN, MQ_TYPE);
 Display lcd(LCD_I2C_ADDR);
 Button btnAck(BTN_ACK_PIN);
 
 TaskHandle_t lcdTask;
-TaskHandle_t tempHumidityTask;
-TaskHandle_t ledsSemaphoreTask;
+TaskHandle_t metricsTask;
+TaskHandle_t ackButtonTask;
 TaskHandle_t restTask;
 SemaphoreHandle_t semaphore;
 
 bool isInitialiazed = false;
 bool isDebugModeEnabled = false;
+bool isDataReady = false;
+bool buzzerEnabled = false;
 
-int currLed = 0;
-
-
-
-
+float temperature = 0.0f;
+float humidity = 0.0f;
+float toluene = 0.0f;
 
 const int Object_Properties = 5;
 const int Array_Elements = 50;
 
-// TODO: 
 const size_t CAPACITY = JSON_ARRAY_SIZE(Array_Elements) + Array_Elements * JSON_OBJECT_SIZE(Object_Properties);
 
 int measure_counter = 0;
@@ -77,16 +81,12 @@ String payloadPOST = "";
 struct Measure {
     String deviceId;
     String deviceName;
-    String temperature;
-    String humidity;
-    String toluene;
+    float temperature;
+    float humidity;
+    float toluene;
 };
 
 struct Measure localHistory[Array_Elements];
-
-
-
-
 
 void setup() {
   WiFi.mode(WIFI_STA);
@@ -101,15 +101,8 @@ void setup() {
 void initTasks() {
   semaphore = xSemaphoreCreateMutex();
   xTaskCreatePinnedToCore(lcdTaskLoop, "lcdTask", TASK_STACK_SIZE, NULL, 1, &lcdTask, TASK_CORE_ONE);
-  xTaskCreatePinnedToCore(
-    tempHumiditySensorTaskLoop,
-    "tempHumiditySensorTask",
-    TASK_STACK_SIZE,
-    NULL,
-    2,
-    &tempHumidityTask,
-    TASK_CORE_ONE);
-  xTaskCreatePinnedToCore(ledsSemaphoreTaskLoop, "ledsSemaphoreTask", TASK_STACK_SIZE, NULL, 1, &ledsSemaphoreTask, TASK_CORE_ONE);
+  xTaskCreatePinnedToCore(metricsTaskLoop, "metricsTask", TASK_STACK_SIZE, NULL, 2, &metricsTask, TASK_CORE_ONE);
+  xTaskCreatePinnedToCore(ackButtonTaskLoop, "ackButtonTask", TASK_STACK_SIZE, NULL, 1, &ackButtonTask, TASK_CORE_ONE);
   xTaskCreatePinnedToCore(restTaskLoop, "restTask", TASK_STACK_SIZE, NULL, 1, &restTask, TASK_CORE_ONE);
 }
 
@@ -126,6 +119,7 @@ void initDevices() {
   pinMode(LED_RED_PIN, OUTPUT);
 
   dht.begin();
+  initMqSensor();
 
   pinMode(DEBUG_PIN, INPUT);
 
@@ -138,6 +132,23 @@ void initDevices() {
   btnAck.addInterrupt(isrBtnAck, FALLING);
 
   initWifiService();
+}
+
+void initMqSensor() {
+  mq.setRegressionMethod(1);
+  mq.setA(44.947);
+  mq.setB(-3.445);
+
+  float calcR0 = 0;
+  for(int i = 1; i<=10; i ++)
+  {
+    mq.update(); // Update data, the arduino will read the voltage from the analog pin
+    calcR0 += mq.calibrate(RatioMQ135CleanAir);
+    Serial.print(".");
+  }
+  mq.setR0(calcR0/10);
+
+  mq.init();
 }
 
 void initWifiService() {
@@ -182,6 +193,7 @@ ICACHE_RAM_ATTR void isrBtnAck() {
 void lcdTaskLoop(void* param) {
   while(true) {
     xSemaphoreTake(semaphore, portMAX_DELAY);
+    printMetrics();
     lcd.show();
     xSemaphoreGive(semaphore);
     
@@ -189,26 +201,37 @@ void lcdTaskLoop(void* param) {
   }
 }
 
-void tempHumiditySensorTaskLoop(void* param) {
-  float temperature;
-  float humidity;
-  
+void metricsTaskLoop(void* param) {
   while(true) {
     xSemaphoreTake(semaphore, portMAX_DELAY);
+    mq.update();
+    toluene = mq.readSensor();
     temperature = dht.readTemperature();
     humidity = dht.readHumidity();
     xSemaphoreGive(semaphore);
 
-    if (isInitialiazed) {
-      printTemperatureHumidityMetrics(temperature, humidity);
-      saveMeasure(String(temperature), String(humidity), "12test");
+    Serial.printf("tol: %f, tmp: %f, hum: %f\n", toluene, temperature, humidity);
 
+    if (isInitialiazed) {
+      saveMeasure(temperature, humidity, toluene);
       printLocalHistory();
     }
     
-    delay(MQ_DELAY);
-    // delay(TEMP_HUMIDITY_DELAY);
+    delay(SAVE_METRICS_DELAY);
   }
+}
+
+void saveMeasure(float temperature, float humidity, float toluene) {
+  char deviceName[64];
+
+  info.getDeviceName(deviceName, sizeof(deviceName));
+
+  localHistory[measure_counter].deviceId = info.getChipModel();
+  localHistory[measure_counter].deviceName = deviceName;
+  localHistory[measure_counter].temperature = temperature;
+  localHistory[measure_counter].humidity = humidity;
+  localHistory[measure_counter].toluene = toluene;
+  measure_counter++;
 }
 
 void restTaskLoop(void* param) {
@@ -225,87 +248,38 @@ void restTaskLoop(void* param) {
   }
 }
 
-void printTemperatureHumidityMetrics(float temperature, float humidity) {
-  static char temperatureText[32], humidityText[32];
-  
-  strings->joinHumidityText(humidity, humidityText, sizeof(humidityText));
-  strings->joinTemperatureText(temperature, temperatureText, sizeof(temperatureText));
+void printMetrics() {
+  static char tolueneText[32], temperatureText[32], humidityText[32];
+
+  strings->joinTolueneText(toluene, LCD_COLS, tolueneText, sizeof(tolueneText));
+  strings->joinHumidityText(humidity, LCD_COLS, humidityText, sizeof(humidityText));
+  strings->joinTemperatureText(temperature, LCD_COLS, temperatureText, sizeof(temperatureText));
 
   lcd.put(0, temperatureText, sizeof(temperatureText));
   lcd.put(1, humidityText, sizeof(humidityText));
+  lcd.show();
+  delay(4000);
+  lcd.put(0, tolueneText, sizeof(tolueneText));
+  lcd.put(1, "", 0);
+  lcd.show();
+  delay(2000);
 }
 
-void ledsSemaphoreTaskLoop(void* param) {
+void ackButtonTaskLoop(void* param) {
   while(true) {
-    if (btnAck.getIsPressed()) {
-      switch(currLed) {
-        case 0:
-          digitalWrite(LED_GREEN_PIN, HIGH);
-          digitalWrite(LED_YELLOW_PIN, LOW);
-          digitalWrite(LED_RED_PIN, LOW);
-          currLed = 1;
-          break;
-        case 1:
-          digitalWrite(LED_GREEN_PIN, LOW);
-          digitalWrite(LED_YELLOW_PIN, HIGH);
-          digitalWrite(LED_RED_PIN, LOW);
-          currLed = 2;
-          break;
-        case 2:
-          digitalWrite(LED_GREEN_PIN, LOW);
-          digitalWrite(LED_YELLOW_PIN, LOW);
-          digitalWrite(LED_RED_PIN, HIGH);
-          currLed = 3;
-          break;
-        default:
-          digitalWrite(LED_GREEN_PIN, LOW);
-          digitalWrite(LED_YELLOW_PIN, LOW);
-          digitalWrite(LED_RED_PIN, LOW);
-          currLed = 0;
-          btnAck.releaseButton();
-      }
+    if ((toluene >= 100 || buzzerEnabled) && !btnAck.getIsPressed()) {
+      buzzerEnabled = true;
+      digitalWrite(BUZZER_PIN, HIGH);
     }
 
+    if (btnAck.getIsPressed()) {
+      btnAck.releaseButton();
+      buzzerEnabled = false;
+      digitalWrite(BUZZER_PIN, LOW);
+    }
     delay(1000);
-  }
-}
-
-
-
-
-
-/*
-void test() {
-    Serial.println("**************************************");
-
-    // step 1: Save as many measures as required in a certain period of time
-    saveMeasure("10a", "11", "12");
-    saveMeasure("20b", "21", "22");
-    saveMeasure("30c", "31", "32");
-    saveMeasure("40d", "41", "42");
     
-    // optional, for debugging
-    // printLocalHistory(); 
-
-    // step 2: Send data to server
-    sendDataToServer();
-
-    // step 3: Clear history
-    clearLocalHistory();
-}
-*/
-
-void saveMeasure(String temperature, String humidity, String toluene) {
-  char deviceName[64];
-
-  info.getDeviceName(deviceName, sizeof(deviceName));
-  
-    localHistory[measure_counter].deviceId = info.getChipModel();
-    localHistory[measure_counter].deviceName = deviceName;
-    localHistory[measure_counter].temperature = temperature;
-    localHistory[measure_counter].humidity = humidity;
-    localHistory[measure_counter].toluene = toluene;
-    measure_counter++;
+  }
 }
 
 void sendDataToServer() {
@@ -320,57 +294,46 @@ void clearLocalHistory() {
 }
 
 void createJSONPayload() {
+  StaticJsonDocument<CAPACITY> doc;
 
-    StaticJsonDocument<CAPACITY> doc;
+  for (int i = 0; i < measure_counter; i++)
+  {
+    JsonObject obj = doc.createNestedObject();
+    obj["device_id"] = localHistory[i].deviceId;
+    obj["device_name"] = localHistory[i].deviceName;
+    obj["temperature"] = localHistory[i].temperature;
+    obj["humidity"] = localHistory[i].humidity;
+    obj["toluene"] = localHistory[i].toluene;
+  }
 
-    for (int i = 0; i < measure_counter; i++)
-    {
-        JsonObject obj = doc.createNestedObject();
-        obj["device_id"] = localHistory[i].deviceId;
-        obj["device_name"] = localHistory[i].deviceName;
-        obj["temperature"] = localHistory[i].temperature;
-        obj["humidity"] = localHistory[i].humidity;
-        obj["toluene"] = localHistory[i].toluene;
-    }
-
-    serializeJson(doc, payloadPOST);
+  serializeJson(doc, payloadPOST);
 }
 
 void executePOST() {
-
-    // Initiate HTTP client
-    HTTPClient http;
-
-    // Start request
-    http.begin(OCI_ENDPOINT);
-
-    // Define content-type to send
-    http.addHeader("Content-Type", "application/json");
-
-
-Serial.println("############### Payload #############");
-
-Serial.println(payloadPOST);
-
-Serial.println("############### End Payload #############");
-
-    // Execute POST request
-    int httpCode = http.POST(payloadPOST);
-
-
-    Serial.println(" ");
-    Serial.printf("> [POST] response code: %d\n", httpCode);
-
-    // Terminate connection
-    http.end();
+  HTTPClient http;
+  
+  http.begin(OCI_ENDPOINT);
+  http.addHeader("Content-Type", "application/json");
+  
+  Serial.println("############### Payload #############");
+  Serial.println(payloadPOST);
+  Serial.println("############### End Payload #############");
+  
+  int httpCode = http.POST(payloadPOST);
+  Serial.printf("> [POST] response code: %d\n", httpCode);
+  
+  http.end();
 }
 
 void printLocalHistory() {
-    for (int i = 0; i < measure_counter; i++) {
-        Serial.print("----------------------------- ");
-        Serial.println(i);
-        Serial.println("Temperature: " + localHistory[i].temperature);
-        Serial.println("Humidity: " + localHistory[i].humidity);
-        Serial.println("Toluene: " + localHistory[i].toluene);
-    }
+  for (int i = 0; i < measure_counter; i++) {
+    Serial.print("----------------------------- ");
+    Serial.println(i);
+    Serial.print("Temperature: ");
+    Serial.println(localHistory[i].temperature);
+    Serial.print("Humidity: ");
+    Serial.println(localHistory[i].humidity);
+    Serial.print("Toluene: ");
+    Serial.println(localHistory[i].toluene);
+  }
 }

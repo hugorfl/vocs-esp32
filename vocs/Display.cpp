@@ -90,6 +90,10 @@ void Display::put(int row, const char* text, int buffSize) {
   screenBuffer->put(row, text, buffSize);
 }
 
+void Display::clear() {
+  lcd.clear();
+}
+
 void Display::printLCD(int row, RowTextBuffer* rowBuffer) {
   lcd.setCursor(0, row);
   lcd.print(rowBuffer->getText() + rowBuffer->getCursorPosition());

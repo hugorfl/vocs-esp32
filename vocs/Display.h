@@ -41,6 +41,7 @@ class Display {
     void show();
     void push(const char* text, int buffSize);
     void put(int row, const char* text, int buffSize);
+    void clear();
   private:
     void printLCD(int row, RowTextBuffer* rowBuffer);
 };
